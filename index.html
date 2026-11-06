@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Christmas Particle Tree | Hand Control</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;font-family:system-ui, sans-serif}
+body{overflow:hidden;background:#050810;color:#fff}
+canvas{display:block}
+#ui{
+    position:fixed;top:16px;left:16px;z-index:10;
+    background:rgba(12,18,30,0.75);
+    backdrop-filter: blur(8px);
+    padding:16px;border-radius:14px;
+    min-width:220px;
+    border:1px solid rgba(255,255,255,0.12);
+}
+#ui h3{margin-bottom:12px;font-size:16px;opacity:0.95}
+.ctrl-item{margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;gap:8px}
+label{font-size:14px;opacity:0.88}
+select, button{padding:6px 10px;border-radius:8px;border:none;font-size:14px}
+button{background:#2b78e4;color:#fff;cursor:pointer}
+#colorPicker{width:44px;height:32px;border:none;border-radius:6px;cursor:pointer}
+#video{position:fixed;bottom:12px;right:12px;width:150px;transform:scaleX(-1);opacity:0.6;border-radius:8px;z-index:9}
+.tip{position:fixed;bottom:16px;left:16px;font-size:13px;opacity:0.65;z-index:8}
+</style>
+</head>
+<body>
+<div id="ui">
+    <h3>🎄 Particle Tree Control</h3>
+    <div class="ctrl-item">
+        <label>Particle Shape</label>
+        <select id="shapeSelect">
+            <option value="star">⭐ Star</option>
+            <option value="circle">● Circle</option>
+            <option value="snow">❄ Snowflake</option>
+            <option value="triangle">▲ Triangle</option>
+        </select>
+    </div>
+    <div class="ctrl-item">
+        <label>Particle Color</label>
+        <input type="color" id="colorPicker" value="#44ff88">
+    </div>
+    <div class="ctrl-item">
+        <button id="fullBtn">Fullscreen</button>
+    </div>
+</div>
+<div class="tip">✋ Open palm → spread | ✊ Close fist → shrink</div>
+<video id="video" autoplay playsinline></video>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js"></script>
+
+<script>
+// ===== Three.js Scene
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x050812);
+const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 1000);
+camera.position.z = 9;
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+document.body.appendChild(renderer.domElement);
+
+// Lights
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+scene.add(ambientLight);
+
+// Particle Geometry Pool
+const shapeCanvas = document.createElement('canvas');
+const shapeCtx = shapeCanvas.getContext('2d');
+shapeCanvas.width = 128; shapeCanvas.height = 128;
+let currentShape = "star";
+let currentColor = "#44ff88";
+let particleTexture;
+
+function buildTexture(shapeName, colorHex) {
+    shapeCtx.clearRect(0,0,128,128);
+    const c = colorHex;
+    shapeCtx.fillStyle = c;
+    shapeCtx.strokeStyle = c;
+    shapeCtx.lineWidth = 3;
+    const cx = 64, cy = 64;
+    const r = 42;
+    if(shapeName === "circle"){
+        shapeCtx.beginPath();
+        shapeCtx.arc(cx,cy,r,0,Math.PI*2);
+        shapeCtx.fill();
+    }else if(shapeName === "triangle"){
+        shapeCtx.beginPath();
+        shapeCtx.moveTo(cx, cy-r);
+        shapeCtx.lineTo(cx-r*0.866, cy+r*0.5);
+        shapeCtx.lineTo(cx+r*0.866, cy+r*0.5);
+        shapeCtx.closePath();
+        shapeCtx.fill();
+    }else if(shapeName === "snow"){
+        for(let i=0;i<6;i++){
+            shapeCtx.save();
+            shapeCtx.translate(cx,cy);
+            shapeCtx.rotate(i * Math.PI / 3);
+            shapeCtx.beginPath();
+            shapeCtx.moveTo(0,0);
+            shapeCtx.lineTo(0,-r);
+            shapeCtx.stroke();
+            shapeCtx.beginPath();
+            shapeCtx.moveTo(0,-r*0.6);
+            shapeCtx.lineTo(-r*0.3,-r*0.85);
+            shapeCtx.moveTo(0,-r*0.6);
+            shapeCtx.lineTo(r*0.3,-r*0.85);
+            shapeCtx.stroke();
+            shapeCtx.restore();
+        }
+    }else if(shapeName === "star"){
+        shapeCtx.beginPath();
+        for(let i=0;i<10;i++){
+            const ang = Math.PI * 0.4 * i - Math.PI/2;
+            const rad = i%2===0 ? r : r*0.45;
+            const x = cx + rad * Math.cos(ang);
+            const y = cy + rad * Math.sin(ang);
+            i===0 ? shapeCtx.moveTo(x,y) : shapeCtx.lineTo(x,y);
+        }
+        shapeCtx.closePath();
+        shapeCtx.fill();
+    }
+    particleTexture = new THREE.CanvasTexture(shapeCanvas);
+}
+buildTexture(currentShape, currentColor);
+
+// Build tree particle points
+const treeCount = 1200;
+const positions = new Float32Array(treeCount * 3);
+const baseScales = new Float32Array(treeCount);
+const offsets = new Float32Array(treeCount * 3);
+for(let i=0;i<treeCount;i++){
+    // Cone / christmas tree distribution
+    const t = Math.random();
+    const h = t * 5.2;
+    const radius = (1 - t) * 2.4;
+    const ang = Math.random() * Math.PI * 2;
+    const r = Math.sqrt(Math.random()) * radius;
+    const x = r * Math.cos(ang);
+    const z = r * Math.sin(ang);
+    const y = -2.2 + h;
+    positions[i*3] = x;
+    positions[i*3+1] = y;
+    positions[i*3+2] = z;
+    offsets[i*3] = (Math.random()-0.5)*0.02;
+    offsets[i*3+1] = (Math.random()-0.5)*0.02;
+    offsets[i*3+2] = (Math.random()-0.5)*0.02;
+    baseScales[i] = 0.25 + Math.random() * 0.45;
+}
+const geo = new THREE.BufferGeometry();
+geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geo.setAttribute('baseScale', new THREE.BufferAttribute(baseScales, 1));
+const mat = new THREE.PointsMaterial({
+    map: particleTexture,
+    transparent:true,
+    depthWrite:false,
+    size:0.4,
+    sizeAttenuation:true
+});
+const treePoints = new THREE.Points(geo, mat);
+scene.add(treePoints);
+
+// Hand control state
+let spreadFactor = 0;
+let targetSpread = 0;
+const spreadSpeed = 3.2;
+
+// MediaPipe Hands
+const videoEl = document.getElementById('video');
+const hands = new Hands({locateFile: f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
+hands.setOptions({maxNumHands:1,modelComplexity:1,minDetectionConfidence:0.7,minTrackingConfidence:0.7});
+hands.onResults(onHandDetect);
+new Camera(videoEl, {onFrame: async ()=> await hands.send({image:videoEl}), width:640, height:480}).start();
+
+function onHandDetect(res){
+    if(!res.multiHandLandmarks || res.multiHandLandmarks.length ===0) return;
+    const lm = res.multiHandLandmarks[0];
+    // check if all fingers open
+    const thumbOpen = lm[4].x < lm[3].x;
+    const indexOpen = lm[8].y < lm[6].y;
+    const midOpen = lm[12].y < lm[10].y;
+    const ringOpen = lm[16].y < lm[14].y;
+    const pinkyOpen = lm[20].y < lm[18].y;
+    const handOpen = thumbOpen && indexOpen && midOpen && ringOpen && pinkyOpen;
+    targetSpread = handOpen ? 1 : 0;
+}
+
+// UI Bind
+const shapeSel = document.getElementById('shapeSelect');
+const colorInp = document.getElementById('colorPicker');
+const fullBtn = document.getElementById('fullBtn');
+shapeSel.onchange = ()=>{
+    currentShape = shapeSel.value;
+    buildTexture(currentShape, currentColor);
+    mat.map = particleTexture;
+}
+colorInp.oninput = ()=>{
+    currentColor = colorInp.value;
+    buildTexture(currentShape, currentColor);
+    mat.map = particleTexture;
+}
+fullBtn.onclick = ()=>{
+    if(!document.fullscreenElement) document.documentElement.requestFullscreen();
+    else document.exitFullscreen();
+}
+
+// Animation
+const clock = new THREE.Clock();
+function animate(){
+    requestAnimationFrame(animate);
+    const dt = clock.getDelta();
+    // Smooth spread
+    spreadFactor += (targetSpread - spreadFactor) * spreadSpeed * dt;
+    // Update particle positions
+    const posAttr = geo.attributes.position;
+    const baseScaleAttr = geo.attributes.baseScale;
+    for(let i=0;i<treeCount;i++){
+        const ix = i*3, iy = i*3+1, iz = i*3+2;
+        const bx = positions[ix];
+        const by = positions[iy];
+        const bz = positions[iz];
+        posAttr.array[ix] = bx + bx * spreadFactor * 0.75 + offsets[ix] * Math.sin(clock.getElapsedTime()*1.8 + i*0.01);
+        posAttr.array[iy] = by + offsets[iy] * Math.sin(clock.getElapsedTime()*2.2 + i*0.02);
+        posAttr.array[iz] = bz + bz * spreadFactor * 0.75 + offsets[iz] * Math.sin(clock.getElapsedTime()*1.5 + i*0.015);
+    }
+    posAttr.needsUpdate = true;
+    // Rotate tree slowly
+    treePoints.rotation.y += dt * 0.22;
+    // Pulse size
+    mat.size = 0.4 + Math.sin(clock.getElapsedTime()*3.5)*0.06;
+    renderer.render(scene,camera);
+}
+animate();
+
+window.addEventListener('resize',()=>{
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+})
+</script>
+</body>
+</html>
